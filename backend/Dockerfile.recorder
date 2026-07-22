@@ -1,0 +1,23 @@
+# Isolated image for the snapshot recorder — carries the Kotak Neo SDK and its
+# ancient transitive pins, kept away from the API image.
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# git: the Kotak Neo SDK installs from a GitHub URL, not PyPI.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-recorder.txt .
+RUN pip install --no-cache-dir -r requirements-recorder.txt \
+    # The SDK pins the obsolete `asyncio` backport, which shadows the stdlib
+    # module and breaks on Python 3.12. Remove it; the stdlib version remains.
+    && pip uninstall -y asyncio || true
+
+COPY app ./app
+
+CMD ["python", "-m", "app.recorder"]

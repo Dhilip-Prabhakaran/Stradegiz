@@ -16,6 +16,45 @@ class Settings:
     upstox_access_token: str = ""
     capture_underlyings: tuple[str, ...] = ("NIFTY", "BANKNIFTY")
     capture_interval_seconds: int = 300
+    #: Which provider the recorder uses: "kotak" or "upstox".
+    data_source: str = "kotak"
+    #: Kotak Neo credentials. These grant full account access, so they live
+    #: only in .env (gitignored) and are never logged.
+    kotak: "KotakCreds | None" = None
+
+
+@dataclass(frozen=True)
+class KotakCreds:
+    consumer_key: str
+    consumer_secret: str
+    mobile: str
+    ucc: str
+    mpin: str
+    totp_secret: str
+
+    def is_complete(self) -> bool:
+        return all(
+            (
+                self.consumer_key,
+                self.consumer_secret,
+                self.mobile,
+                self.ucc,
+                self.mpin,
+                self.totp_secret,
+            )
+        )
+
+
+def _kotak_creds() -> KotakCreds:
+    e = os.environ.get
+    return KotakCreds(
+        consumer_key=e("KOTAK_CONSUMER_KEY", ""),
+        consumer_secret=e("KOTAK_CONSUMER_SECRET", ""),
+        mobile=e("KOTAK_MOBILE", ""),
+        ucc=e("KOTAK_UCC", ""),
+        mpin=e("KOTAK_MPIN", ""),
+        totp_secret=e("KOTAK_TOTP_SECRET", ""),
+    )
 
 
 def get_settings() -> Settings:
@@ -33,4 +72,6 @@ def get_settings() -> Settings:
             if u.strip()
         ),
         capture_interval_seconds=int(os.environ.get("CAPTURE_INTERVAL_SECONDS", "300")),
+        data_source=os.environ.get("DATA_SOURCE", "kotak").strip().lower(),
+        kotak=_kotak_creds(),
     )

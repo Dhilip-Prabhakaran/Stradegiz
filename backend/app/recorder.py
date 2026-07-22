@@ -18,7 +18,8 @@ from datetime import date, datetime
 from . import auth
 from .config import get_settings
 from .datasources.base import DataSourceError
-from .datasources.upstox_source import ChainRow, UpstoxOptionChain
+from .datasources.factory import make_source
+from .datasources.upstox_source import ChainRow
 from .db import connection
 from .market_hours import IST, is_market_open, next_tick, now_ist
 
@@ -133,23 +134,23 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     settings = get_settings()
 
-    # Bootstrap: if a token is set in .env and the DB has none yet, seed it.
-    # This keeps the .env path working while moving the source of truth to the
-    # DB, where a daily token can be replaced without a restart.
-    if settings.upstox_access_token and auth.get_valid_token() is None:
+    # Upstox path only: bootstrap a .env token into the DB so it can be
+    # replaced later without a restart. Harmless when DATA_SOURCE=kotak.
+    if (
+        settings.data_source == "upstox"
+        and settings.upstox_access_token
+        and auth.get_valid_token() is None
+    ):
         auth.save_token(settings.upstox_access_token)
         log.info("seeded Upstox token from .env into the database")
 
-    # The client reads the current token from the DB on every request, so a
-    # token pasted mid-session takes effect immediately.
-    source = UpstoxOptionChain(auth.get_valid_token)
+    try:
+        source = make_source(settings)
+    except DataSourceError as exc:
+        log.error("%s", exc)
+        raise SystemExit(1)
 
-    if auth.get_valid_token() is None:
-        log.warning(
-            "no valid Upstox token yet — recorder will idle and log capture "
-            "errors until one is supplied. Paste today's token to start capturing."
-        )
-
+    log.info("data source: %s", settings.data_source)
     underlyings = settings.capture_underlyings
 
     if args.once:

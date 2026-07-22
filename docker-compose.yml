@@ -39,7 +39,9 @@ services:
   # The archive-builder. Five-minute OI history cannot be bought later, so
   # this should be running every trading day.
   recorder:
-    build: ./backend
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.recorder
     container_name: stradegiz-recorder
     restart: unless-stopped
     depends_on:
