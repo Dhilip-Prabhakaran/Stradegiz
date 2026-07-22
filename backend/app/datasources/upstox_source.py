@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -66,19 +66,27 @@ class UpstoxOptionChain:
 
     name = "upstox"
 
-    def __init__(self, access_token: str, timeout: float = 10.0) -> None:
-        if not access_token:
-            # Failing loudly here beats a confusing 401 later.
-            raise DataSourceError(
-                "UPSTOX_ACCESS_TOKEN is not set — the recorder cannot authenticate"
-            )
-        self._token = access_token
+    def __init__(
+        self,
+        token_provider: Callable[[], str | None],
+        timeout: float = 10.0,
+    ) -> None:
+        # A provider (not a fixed string) so a token refreshed mid-session is
+        # picked up on the very next request without rebuilding the client.
+        self._token_provider = token_provider
         self._timeout = timeout
 
     def _headers(self) -> dict[str, str]:
+        token = self._token_provider()
+        if not token:
+            # Failing loudly here beats a confusing 401 later.
+            raise DataSourceError(
+                "no valid Upstox token available — it is missing or expired "
+                "(Upstox tokens expire daily at 03:30 IST)"
+            )
         return {
             "Accept": "application/json",
-            "Authorization": f"Bearer {self._token}",
+            "Authorization": f"Bearer {token}",
         }
 
     def expiries(self, underlying: str) -> list[date]:

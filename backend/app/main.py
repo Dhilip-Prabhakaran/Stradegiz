@@ -7,7 +7,7 @@ from datetime import date
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import oi_queries, queries
+from . import oi_queries, queries, status
 from .datasources.base import TF_DAILY
 
 app = FastAPI(title="Stradegiz API", version="0.1.0")
@@ -24,6 +24,12 @@ app.add_middleware(
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/health/capture")
+def capture_health() -> dict:
+    """Token validity + last capture per underlying, for the UI staleness banner."""
+    return status.capture_health()
 
 
 @app.get("/api/symbols")

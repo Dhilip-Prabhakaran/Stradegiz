@@ -15,6 +15,7 @@ import logging
 import time as _time
 from datetime import date, datetime
 
+from . import auth
 from .config import get_settings
 from .datasources.base import DataSourceError
 from .datasources.upstox_source import ChainRow, UpstoxOptionChain
@@ -132,12 +133,22 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     settings = get_settings()
 
-    try:
-        source = UpstoxOptionChain(settings.upstox_access_token)
-    except DataSourceError as exc:
-        log.error("%s", exc)
-        log.error("Set it in .env — see .env.example. The recorder cannot start without it.")
-        raise SystemExit(1)
+    # Bootstrap: if a token is set in .env and the DB has none yet, seed it.
+    # This keeps the .env path working while moving the source of truth to the
+    # DB, where a daily token can be replaced without a restart.
+    if settings.upstox_access_token and auth.get_valid_token() is None:
+        auth.save_token(settings.upstox_access_token)
+        log.info("seeded Upstox token from .env into the database")
+
+    # The client reads the current token from the DB on every request, so a
+    # token pasted mid-session takes effect immediately.
+    source = UpstoxOptionChain(auth.get_valid_token)
+
+    if auth.get_valid_token() is None:
+        log.warning(
+            "no valid Upstox token yet — recorder will idle and log capture "
+            "errors until one is supplied. Paste today's token to start capturing."
+        )
 
     underlyings = settings.capture_underlyings
 

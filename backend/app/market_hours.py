@@ -28,6 +28,25 @@ def is_market_open(at: datetime | None = None) -> bool:
     return is_trading_day(at.date()) and OPEN <= at.time() <= CLOSE
 
 
+#: Upstox tokens expire at this wall-clock time in IST, regardless of issue time.
+TOKEN_EXPIRY = time(3, 30)
+
+
+def next_token_expiry(issued: datetime | None = None) -> datetime:
+    """The next 03:30 IST at or after `issued` — when an Upstox token dies.
+
+    A token issued at 02:00 IST expires the SAME day at 03:30; one issued at
+    any later hour expires 03:30 the following day.
+    """
+    issued = (issued or now_ist()).astimezone(IST)
+    today_expiry = issued.replace(
+        hour=TOKEN_EXPIRY.hour, minute=TOKEN_EXPIRY.minute, second=0, microsecond=0
+    )
+    if issued <= today_expiry:
+        return today_expiry
+    return today_expiry + timedelta(days=1)
+
+
 def next_tick(interval_seconds: int, at: datetime | None = None) -> datetime:
     """The next wall-clock boundary that is a multiple of the interval.
 

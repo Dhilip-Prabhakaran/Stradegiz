@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from app.market_hours import IST, is_market_open, next_tick
+from app.market_hours import IST, is_market_open, next_tick, next_token_expiry
 
 # 2026-07-21 is a Tuesday; 2026-07-25 a Saturday.
 TUE = (2026, 7, 21)
@@ -45,3 +45,22 @@ class TestNextTick:
 
     def test_rolls_over_the_hour(self):
         assert next_tick(300, ist(*TUE, 12, 58, 1)) == ist(*TUE, 13, 0)
+
+
+class TestNextTokenExpiry:
+    """Upstox tokens die at 03:30 IST regardless of when issued."""
+
+    def test_evening_token_expires_next_morning(self):
+        # Issued 20:00 Tue -> expires 03:30 Wed.
+        assert next_token_expiry(ist(*TUE, 20, 0)) == ist(2026, 7, 22, 3, 30)
+
+    def test_early_morning_token_expires_same_day(self):
+        # Issued 02:30 Tue -> expires 03:30 Tue (same day).
+        assert next_token_expiry(ist(*TUE, 2, 30)) == ist(*TUE, 3, 30)
+
+    def test_token_issued_after_expiry_hour_rolls_to_next_day(self):
+        # Issued 09:15 Tue -> expires 03:30 Wed.
+        assert next_token_expiry(ist(*TUE, 9, 15)) == ist(2026, 7, 22, 3, 30)
+
+    def test_exactly_at_expiry_boundary_is_same_day(self):
+        assert next_token_expiry(ist(*TUE, 3, 30)) == ist(*TUE, 3, 30)
