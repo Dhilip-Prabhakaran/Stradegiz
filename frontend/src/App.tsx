@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { CaptureBanner } from './CaptureBanner';
 import { OiTable } from './OiTable';
 import {
   fetchExpiries,
@@ -101,6 +102,8 @@ export default function App() {
           Stradegiz <span className="tag">OI Analysis</span>
         </div>
       </header>
+
+      <CaptureBanner />
 
       <section className="controls">
         <div className="mode">

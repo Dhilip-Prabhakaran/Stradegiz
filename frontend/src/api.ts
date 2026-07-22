@@ -39,6 +39,33 @@ export interface OiAnalysis {
   rows: OiRow[];
 }
 
+export interface TokenStatus {
+  present: boolean;
+  valid: boolean;
+  issued_at: string | null;
+  expires_at: string | null;
+  seconds_left: number | null;
+}
+
+export interface CaptureEntry {
+  underlying: string;
+  ts: string | null;
+  status: string;
+  rows_written: number;
+  detail: string | null;
+}
+
+export interface CaptureHealth {
+  now_ist: string;
+  market_open: boolean;
+  healthy: boolean;
+  token: TokenStatus;
+  captures: CaptureEntry[];
+}
+
+export const fetchCaptureHealth = () =>
+  getJson<CaptureHealth>('/api/health/capture');
+
 export const fetchExpiries = (underlying: string) =>
   getJson<string[]>(`/api/oi/expiries?underlying=${underlying}`);
 

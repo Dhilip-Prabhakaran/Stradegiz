@@ -109,6 +109,49 @@ body {
   opacity: 0.5;
 }
 
+.capture-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  padding: 0.6rem 1rem;
+  font-size: 0.85rem;
+  border-bottom: 1px solid transparent;
+}
+
+.capture-banner.error {
+  background: rgba(239, 83, 80, 0.14);
+  border-bottom-color: var(--down);
+  color: #ffb4b0;
+}
+
+.capture-banner.warn {
+  background: rgba(255, 193, 7, 0.12);
+  border-bottom-color: #d0a215;
+  color: #ffd97a;
+}
+
+.banner-msg {
+  font-weight: 600;
+}
+
+.banner-meta {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.banner-cmd {
+  margin-left: auto;
+  padding: 0.2rem 0.5rem;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: ui-monospace, monospace;
+  font-size: 0.75rem;
+  color: var(--text);
+  user-select: all; /* one click selects the whole command to copy */
+}
+
 .mode {
   display: flex;
   flex-direction: column;
