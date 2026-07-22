@@ -1,0 +1,89 @@
+services:
+  db:
+    image: timescale/timescaledb:latest-pg16
+    container_name: stradegiz-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: stradegiz
+      POSTGRES_PASSWORD: stradegiz_dev
+      POSTGRES_DB: stradegiz
+    ports:
+      # Exposed so you can point a GUI client (DBeaver/pgAdmin) at it.
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      # Files here run once, in name order, on first init of an empty volume.
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stradegiz -d stradegiz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: ./backend
+    container_name: stradegiz-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://stradegiz:stradegiz_dev@db:5432/stradegiz
+    ports:
+      # Host 8100: the ATS project already owns 8000 on this machine.
+      - "8100:8000"
+    volumes:
+      - ./backend/app:/app/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # The archive-builder. Five-minute OI history cannot be bought later, so
+  # this should be running every trading day.
+  recorder:
+    build: ./backend
+    container_name: stradegiz-recorder
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://stradegiz:stradegiz_dev@db:5432/stradegiz
+    volumes:
+      - ./backend/app:/app/app
+    command: python -m app.recorder
+
+  frontend:
+    build: ./frontend
+    container_name: stradegiz-frontend
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      # Host 5273: the ATS project already owns 5173 on this machine.
+      - "5273:5173"
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html
+      # Anonymous volume keeps the image's node_modules from being shadowed.
+      - /app/node_modules
+
+  backend:
+    build: ./backend
+    container_name: stradegiz-backend
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://stradegiz:stradegiz_dev@db:5432/stradegiz
+      DEFAULT_EXCHANGE: NSE
+      INITIAL_HISTORY_DAYS: "730"
+    volumes:
+      # Source is mounted so edits take effect without a rebuild.
+      - ./backend/app:/app/app
+    # Ingestion is a task, not a service: started on demand via
+    # `docker compose run --rm backend ...`, so it must not run at `up`.
+    profiles: ["tools"]
+
+volumes:
+  db_data:
