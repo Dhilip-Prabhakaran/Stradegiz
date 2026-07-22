@@ -1,0 +1,9 @@
+# Normalise line endings: store as LF in the repo, check out as-is.
+# Stops the "LF will be replaced by CRLF" warnings and spurious whole-file
+# diffs when committing from Windows.
+* text=auto eol=lf
+
+# Binary types Git must never touch.
+*.png binary
+*.jpg binary
+*.ico binary
