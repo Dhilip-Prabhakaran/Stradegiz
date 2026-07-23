@@ -1,17 +1,20 @@
-"""End-of-day option data from the NSE F&O Bhavcopy.
+"""End-of-day option data from the NSE and BSE F&O bhavcopy archives.
 
 Kotak has no historical endpoint, so live snapshots are the only way to build
-intraday history. But NSE publishes a free daily archive going back years, so
-*daily* OI can be backfilled immediately rather than waited for.
+intraday history. But both exchanges publish free daily archives going back
+years, so *daily* OI can be backfilled immediately rather than waited for.
 
-Scope: NSE index options (NIFTY, BANKNIFTY, ...). SENSEX/BANKEX are BSE
-contracts and need the separate BSE archive, which this module does not cover.
+Both exchanges publish the same UDiFF column set (verified against real
+2026-07-22 files), so parsing is shared. They differ only in delivery:
+  NSE: zipped CSV, 404s when a file is absent
+  BSE: plain CSV, and answers a MISSING file with 200 + an HTML page — so the
+       body must be sniffed rather than trusted by status code alone.
 
-Column names and conventions verified against a real 2026-07-22 file:
+Conventions, both exchanges:
   TckrSymb  XpryDt(ISO)  StrkPric  OptnTp  OpnIntrst  ChngInOpnIntrst
   TtlTradgVol  ClsPric  UndrlygPric
-Note StrkPric is the plain strike here — unlike Kotak's scrip master, it is
-NOT scaled by 100.
+StrkPric is the plain strike here — unlike Kotak's scrip master, it is NOT
+scaled by 100.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from __future__ import annotations
 import io
 import logging
 import zipfile
+from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -32,29 +36,83 @@ from .upstox_source import ChainRow
 
 log = logging.getLogger("stradegiz.bhavcopy")
 
-URL = (
-    "https://nsearchives.nseindia.com/content/fo/"
-    "BhavCopy_NSE_FO_0_0_0_{d}_F_0000.csv.zip"
+#: Both exchanges reject requests without a browser-like agent.
+_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
 
-# NSE rejects requests without a browser-like agent.
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+
+@dataclass(frozen=True)
+class Archive:
+    """One exchange's daily derivatives archive."""
+
+    name: str
+    url_template: str
+    zipped: bool
+    headers: dict[str, str]
+    underlyings: frozenset[str]
+
+
+NSE = Archive(
+    name="NSE",
+    url_template=(
+        "https://nsearchives.nseindia.com/content/fo/"
+        "BhavCopy_NSE_FO_0_0_0_{d}_F_0000.csv.zip"
     ),
-    "Accept": "*/*",
-}
+    zipped=True,
+    headers={"User-Agent": _AGENT, "Accept": "*/*"},
+    underlyings=frozenset(
+        {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"}
+    ),
+)
+
+BSE = Archive(
+    name="BSE",
+    url_template=(
+        "https://www.bseindia.com/download/BhavCopy/Derivative/"
+        "BhavCopy_BSE_FO_0_0_0_{d}_F_0000.CSV"
+    ),
+    zipped=False,
+    headers={
+        "User-Agent": _AGENT,
+        # BSE serves the file only with a plausible referer.
+        "Referer": (
+            "https://www.bseindia.com/markets/derivatives/DeriReports/"
+            "DeriBhavCopy.aspx"
+        ),
+        "Accept": "*/*",
+    },
+    underlyings=frozenset({"SENSEX", "BANKEX"}),
+)
+
+ARCHIVES = (NSE, BSE)
+
+#: Retained for callers that predate multi-exchange support.
+NSE_UNDERLYINGS = set(NSE.underlyings)
+SUPPORTED = set(NSE.underlyings) | set(BSE.underlyings)
 
 #: FinInstrmTp code for index options (STO/STF/IDF are stock options,
-#: stock futures and index futures respectively).
+#: stock futures and index futures respectively). Same on both exchanges.
 INDEX_OPTION = "IDO"
 
 #: EOD rows are stamped after the close so they cannot collide with the
 #: 15:30 intraday snapshot on days where both exist.
 EOD_TIME = time(15, 40)
 
-NSE_UNDERLYINGS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"}
+#: Every UDiFF file starts with this column, so it distinguishes a real CSV
+#: from BSE's HTML "not found" page, which also arrives as HTTP 200.
+CSV_SENTINEL = "TradDt"
+
+
+def archives_for(underlyings: set[str]) -> list[tuple[Archive, set[str]]]:
+    """Group the requested underlyings by the archive that carries them."""
+    out = []
+    for archive in ARCHIVES:
+        wanted = {u for u in underlyings if u in archive.underlyings}
+        if wanted:
+            out.append((archive, wanted))
+    return out
 
 
 def _dec(value: Any) -> Decimal | None:
@@ -75,15 +133,19 @@ def _int(value: Any) -> int:
         return 0
 
 
-def download(day: date, client: httpx.Client | None = None) -> pd.DataFrame | None:
-    """The day's F&O bhavcopy, or None when NSE has no file (holiday/weekend)."""
-    url = URL.format(d=day.strftime("%Y%m%d"))
+def download(
+    day: date, archive: Archive = NSE, client: httpx.Client | None = None
+) -> pd.DataFrame | None:
+    """The day's bhavcopy, or None when the exchange has no file for it."""
+    url = archive.url_template.format(d=day.strftime("%Y%m%d"))
     owned = client is None
     client = client or httpx.Client(timeout=90, follow_redirects=True)
     try:
-        resp = client.get(url, headers=HEADERS)
+        resp = client.get(url, headers=archive.headers)
     except httpx.HTTPError as exc:
-        raise DataSourceError(f"bhavcopy fetch failed for {day}: {exc}") from exc
+        raise DataSourceError(
+            f"{archive.name} bhavcopy fetch failed for {day}: {exc}"
+        ) from exc
     finally:
         if owned:
             client.close()
@@ -92,18 +154,28 @@ def download(day: date, client: httpx.Client | None = None) -> pd.DataFrame | No
         # Weekend or trading holiday — absence is expected, not an error.
         return None
     if resp.status_code != 200:
-        raise DataSourceError(f"bhavcopy {day}: HTTP {resp.status_code}")
+        raise DataSourceError(f"{archive.name} bhavcopy {day}: HTTP {resp.status_code}")
 
     try:
-        zf = zipfile.ZipFile(io.BytesIO(resp.content))
-        return pd.read_csv(zf.open(zf.namelist()[0]))
+        if archive.zipped:
+            zf = zipfile.ZipFile(io.BytesIO(resp.content))
+            return pd.read_csv(zf.open(zf.namelist()[0]))
+
+        # BSE answers a missing file with 200 and an HTML page, so the body
+        # must be checked; trusting the status code would parse the markup.
+        text = resp.text
+        if not text.lstrip().startswith(CSV_SENTINEL):
+            return None
+        return pd.read_csv(io.StringIO(text))
     except (zipfile.BadZipFile, ValueError) as exc:
-        raise DataSourceError(f"bhavcopy {day}: unreadable archive ({exc})") from exc
+        raise DataSourceError(
+            f"{archive.name} bhavcopy {day}: unreadable file ({exc})"
+        ) from exc
 
 
 def to_rows(df: pd.DataFrame, day: date, underlyings: set[str]) -> list[ChainRow]:
     """Index-option rows for the requested underlyings."""
-    wanted = {u for u in underlyings if u in NSE_UNDERLYINGS}
+    wanted = {u for u in underlyings if u in SUPPORTED}
     if not wanted:
         return []
 
@@ -152,7 +224,11 @@ def to_rows(df: pd.DataFrame, day: date, underlyings: set[str]) -> list[ChainRow
 def fetch_day(
     day: date, underlyings: set[str], client: httpx.Client | None = None
 ) -> list[ChainRow]:
-    df = download(day, client)
-    if df is None:
-        return []
-    return to_rows(df, day, underlyings)
+    """Rows for one day across whichever exchanges carry the underlyings."""
+    rows: list[ChainRow] = []
+    for archive, wanted in archives_for(underlyings):
+        df = download(day, archive, client)
+        if df is None:
+            continue
+        rows.extend(to_rows(df, day, wanted))
+    return rows

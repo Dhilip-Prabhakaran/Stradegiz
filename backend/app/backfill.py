@@ -102,12 +102,19 @@ def main() -> None:
         p.error("give --days or --from")
 
     wanted = set(settings.capture_underlyings)
-    skipped = wanted - bhavcopy.NSE_UNDERLYINGS
+    skipped = wanted - bhavcopy.SUPPORTED
     if skipped:
-        # SENSEX/BANKEX live in the BSE archive, which this loader does not read.
-        log.warning("not in the NSE archive, skipping: %s", ", ".join(sorted(skipped)))
+        log.warning("no archive carries these, skipping: %s", ", ".join(sorted(skipped)))
 
-    log.info("backfilling %s to %s for %s", start, end, ", ".join(sorted(wanted & bhavcopy.NSE_UNDERLYINGS)))
+    covered = wanted & bhavcopy.SUPPORTED
+    if not covered:
+        log.error("nothing to backfill")
+        return
+
+    by_exchange = ", ".join(
+        f"{a.name}:{'+'.join(sorted(u))}" for a, u in bhavcopy.archives_for(covered)
+    )
+    log.info("backfilling %s to %s — %s", start, end, by_exchange)
     days, rows = run(start, end, wanted)
     log.info("done: %d trading days, %d rows", days, rows)
 
