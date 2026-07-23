@@ -9,7 +9,12 @@ import {
 } from './api';
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX'];
-const INTERVALS = ['1min', '3min', '5min', '15min', '30min', '60min'];
+const INTERVALS = ['1min', '3min', '5min', '15min', '30min', '60min', '1day'];
+
+/** The daily interval spans trading days (backfilled EOD data) rather than
+ *  buckets within one day, so it swaps the single date for a range. */
+const DAILY = '1day';
+const DEFAULT_RANGE_DAYS = 90;
 
 /** How often Live mode re-polls. The recorder writes every 5 min, so a
  *  30s refresh picks up a new snapshot well within one bucket. */
@@ -19,6 +24,13 @@ const LIVE_REFRESH_MS = 30_000;
 const todayIST = () =>
   new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
 
+/** An ISO date `days` before today (IST). */
+const daysAgoIST = (days: number) => {
+  const d = new Date();
+  d.setDate(d.getDate() - days);
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(d);
+};
+
 export default function App() {
   const [underlying, setUnderlying] = useState('NIFTY');
   const [expiries, setExpiries] = useState<string[]>([]);
@@ -26,6 +38,7 @@ export default function App() {
   const [strikes, setStrikes] = useState<number[]>([]);
   const [strike, setStrike] = useState<number | null>(null);
   const [on, setOn] = useState(todayIST());
+  const [from, setFrom] = useState(daysAgoIST(DEFAULT_RANGE_DAYS));
   const [interval, setIntervalV] = useState('5min');
   const [live, setLive] = useState(true);
 
@@ -54,14 +67,20 @@ export default function App() {
       .catch((e) => setError(String(e.message ?? e)));
   }, [underlying, expiry]);
 
-  // Live always reads today (IST); Historical uses the chosen date.
-  const effectiveDate = live ? todayIST() : on;
+  const isDaily = interval === DAILY;
+
+  // Live always reads today (IST); Historical uses the chosen date. Daily
+  // spans a range instead, so Live has no meaning there.
+  const effectiveDate = live && !isDaily ? todayIST() : on;
 
   const load = () => {
     if (!expiry || strike === null) return;
     setLoading(true);
     setError(null);
-    fetchOiAnalysis({ underlying, expiry, strike, on: effectiveDate, interval })
+    const range = isDaily
+      ? { start: from, end: on }
+      : { on: effectiveDate };
+    fetchOiAnalysis({ underlying, expiry, strike, ...range, interval })
       .then((d) => {
         setData(d);
         setUpdatedAt(
@@ -85,11 +104,11 @@ export default function App() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [underlying, expiry, strike, effectiveDate, interval, live]);
+  }, [underlying, expiry, strike, effectiveDate, from, interval, live]);
 
-  // In Live mode keep polling; Historical data never changes, so it does not.
+  // Poll only in Live mode. Historical and daily data never change.
   useEffect(() => {
-    if (!live) return;
+    if (!live || isDaily) return;
     const id = window.setInterval(load, LIVE_REFRESH_MS);
     return () => window.clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -112,7 +131,8 @@ export default function App() {
             <label className="radio">
               <input
                 type="radio"
-                checked={live}
+                checked={live && !isDaily}
+                disabled={isDaily}
                 onChange={() => setLive(true)}
               />
               Live data
@@ -120,7 +140,8 @@ export default function App() {
             <label className="radio">
               <input
                 type="radio"
-                checked={!live}
+                checked={!live || isDaily}
+                disabled={isDaily}
                 onChange={() => setLive(false)}
               />
               Historical
@@ -160,12 +181,23 @@ export default function App() {
           </select>
         </label>
 
+        {isDaily && (
+          <label>
+            <span>From</span>
+            <input
+              type="date"
+              value={from}
+              onChange={(e) => setFrom(e.target.value)}
+            />
+          </label>
+        )}
+
         <label>
-          <span>Date</span>
+          <span>{isDaily ? 'To' : 'Date'}</span>
           <input
             type="date"
             value={effectiveDate}
-            disabled={live}
+            disabled={live && !isDaily}
             onChange={(e) => setOn(e.target.value)}
           />
         </label>

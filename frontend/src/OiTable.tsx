@@ -1,5 +1,13 @@
 import type { Interpretation, OiRow, SideRow } from './api';
-import { bucketLabel, inr, signed, signedInt, intervalMinutes } from './format';
+import {
+  bucketLabel,
+  dayLabel,
+  inr,
+  intervalMinutes,
+  isDailyInterval,
+  signed,
+  signedInt,
+} from './format';
 
 const BADGE_CLASS: Record<Interpretation, string> = {
   'Long Build Up': 'b-long-build',
@@ -51,6 +59,7 @@ export function OiTable({
   interval: string;
 }) {
   const mins = intervalMinutes(interval);
+  const daily = isDailyInterval(interval);
   const blank: SideRow = {
     oi: 0,
     oi_change: null,
@@ -74,7 +83,7 @@ export function OiTable({
             </th>
           </tr>
           <tr>
-            <th>Time</th>
+            <th>{daily ? 'Date' : 'Time'}</th>
             <th>Call OI</th>
             <th>Chng in OI</th>
             <th>LTP</th>
@@ -93,7 +102,9 @@ export function OiTable({
             const p = r.put ?? blank;
             return (
               <tr key={r.time}>
-                <td className="time">{bucketLabel(r.time, mins)}</td>
+                <td className="time">
+                  {daily ? dayLabel(r.time) : bucketLabel(r.time, mins)}
+                </td>
                 <td className="num">{inr(c.oi)}</td>
                 <Num value={c.oi_change} />
                 <td className="num">

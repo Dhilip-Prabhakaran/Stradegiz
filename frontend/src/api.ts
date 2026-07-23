@@ -83,10 +83,17 @@ export const fetchOiAnalysis = (p: {
   underlying: string;
   expiry: string;
   strike: number;
-  on: string;
+  /** Single trading day, for intraday intervals. */
+  on?: string;
+  /** Date range, for the daily interval. */
+  start?: string;
+  end?: string;
   interval: string;
-}) =>
-  getJson<OiAnalysis>(
+}) => {
+  const range =
+    p.start && p.end ? `&start=${p.start}&end=${p.end}` : `&on=${p.on}`;
+  return getJson<OiAnalysis>(
     `/api/oi/analysis?underlying=${p.underlying}&expiry=${p.expiry}` +
-      `&strike=${p.strike}&on=${p.on}&interval=${p.interval}`,
+      `&strike=${p.strike}${range}&interval=${p.interval}`,
   );
+};

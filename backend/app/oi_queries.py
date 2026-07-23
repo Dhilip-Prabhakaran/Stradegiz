@@ -18,7 +18,13 @@ INTERVALS = {
     "15min": "15 minutes",
     "30min": "30 minutes",
     "60min": "1 hour",
+    # Day buckets read the bhavcopy backfill, where each trading day
+    # contributes one end-of-day row.
+    "1day": "1 day",
 }
+
+#: Intervals that span multiple trading days rather than sitting within one.
+MULTI_DAY = {"1day"}
 
 
 def available_expiries(underlying: str) -> list[str]:
@@ -55,16 +61,23 @@ def oi_analysis(
     underlying: str,
     expiry: date,
     strike: float,
-    on: date,
+    start: date,
+    end: date,
     interval: str = "5min",
 ) -> list[dict[str, Any]]:
-    """One strike over a trading day, bucketed, call and put side by side.
+    """One strike over a date range, bucketed, call and put side by side.
 
-    This backs the OI Analysis screen: each row is a time bucket showing how
-    OI and price moved during it, plus the resulting interpretation.
+    Backs the OI Analysis screen. Intraday intervals are normally called with
+    start == end (a single trading day); the '1day' interval spans a range and
+    reads the end-of-day backfill, one row per trading day.
+
+    NSE hours (09:15-15:30 IST = 03:45-10:00 UTC) fall inside a single UTC
+    day, so bucketing in UTC does not shift any trading day.
     """
     if interval not in INTERVALS:
         raise ValueError(f"unsupported interval: {interval}")
+    if end < start:
+        raise ValueError("end date is before start date")
 
     with connection() as conn:
         with conn.cursor() as cur:
@@ -85,7 +98,7 @@ def oi_analysis(
                 GROUP BY bucket, option_type
                 ORDER BY bucket
                 """,
-                (underlying, expiry, strike, on, on),
+                (underlying, expiry, strike, start, end),
             )
             rows = cur.fetchall()
 
@@ -113,7 +126,7 @@ def oi_analysis(
                 continue
 
             prev_side = prev.get(side) if prev else None
-            # The first bucket of a day has no predecessor, so its changes are
+            # The first bucket in range has no predecessor, so its changes are
             # unknown rather than zero — reported as null so the UI can show
             # a dash instead of implying a flat reading.
             oi_change = (

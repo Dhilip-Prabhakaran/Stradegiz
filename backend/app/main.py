@@ -75,12 +75,23 @@ def oi_analysis(
     underlying: str = Query("NIFTY"),
     expiry: date = Query(...),
     strike: float = Query(...),
-    on: date = Query(..., description="trading day"),
+    on: date | None = Query(None, description="single trading day (intraday)"),
+    start: date | None = Query(None, description="range start (daily)"),
+    end: date | None = Query(None, description="range end (daily)"),
     interval: str = Query("5min"),
 ) -> dict:
+    # `on` stays supported for the intraday screen; a start/end pair drives
+    # the daily view over the bhavcopy backfill.
+    if start is None or end is None:
+        if on is None:
+            raise HTTPException(
+                status_code=400, detail="provide either 'on' or 'start' and 'end'"
+            )
+        start = end = on
+
     try:
         rows = oi_queries.oi_analysis(
-            underlying.upper(), expiry, strike, on, interval
+            underlying.upper(), expiry, strike, start, end, interval
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -89,7 +100,9 @@ def oi_analysis(
         "underlying": underlying.upper(),
         "expiry": expiry.isoformat(),
         "strike": strike,
-        "date": on.isoformat(),
+        "date": start.isoformat(),
+        "start": start.isoformat(),
+        "end": end.isoformat(),
         "interval": interval,
         "rows": rows,
     }

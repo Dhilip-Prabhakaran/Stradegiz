@@ -26,14 +26,26 @@ const IST = new Intl.DateTimeFormat('en-GB', {
   hour12: false,
 });
 
+const IST_DATE = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Asia/Kolkata',
+  day: '2-digit',
+  month: 'short',
+  year: 'numeric',
+});
+
 export const hhmm = (iso: string): string => IST.format(new Date(iso));
 
-/** Bucket start -> the "14:20-14:25" range label the screens use. */
+/** Daily rows are one trading day, so they read as a date, not a time span. */
+export const dayLabel = (iso: string): string => IST_DATE.format(new Date(iso));
+
+/** Bucket start -> the "14:20-14:25" range label the intraday screens use. */
 export const bucketLabel = (iso: string, minutes: number): string => {
   const start = new Date(iso);
   const end = new Date(start.getTime() + minutes * 60_000);
   return `${IST.format(start)}-${IST.format(end)}`;
 };
 
+export const isDailyInterval = (interval: string): boolean => interval === '1day';
+
 export const intervalMinutes = (interval: string): number =>
-  parseInt(interval.replace('min', ''), 10) || 5;
+  isDailyInterval(interval) ? 1440 : parseInt(interval.replace('min', ''), 10) || 5;
