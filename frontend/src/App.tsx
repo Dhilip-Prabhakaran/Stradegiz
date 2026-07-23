@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react';
 import { CaptureBanner } from './CaptureBanner';
+import { EmptyState } from './EmptyState';
 import { OiTable } from './OiTable';
 import {
+  fetchCoverage,
   fetchExpiries,
   fetchOiAnalysis,
   fetchStrikes,
+  type Coverage,
   type OiAnalysis,
 } from './api';
 
@@ -42,6 +45,7 @@ export default function App() {
   const [interval, setIntervalV] = useState('5min');
   const [live, setLive] = useState(true);
 
+  const [coverage, setCoverage] = useState<Coverage | null>(null);
   const [data, setData] = useState<OiAnalysis | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -66,6 +70,12 @@ export default function App() {
       })
       .catch((e) => setError(String(e.message ?? e)));
   }, [underlying, expiry]);
+
+  // Coverage drives the empty state, and only changes as new days are
+  // recorded, so it is fetched per underlying rather than per query.
+  useEffect(() => {
+    fetchCoverage(underlying).then(setCoverage).catch(() => setCoverage(null));
+  }, [underlying]);
 
   const isDaily = interval === DAILY;
 
@@ -223,7 +233,21 @@ export default function App() {
 
       <main className="content">
         {error && <div className="error">{error}</div>}
-        {!error && data && (
+
+        {/* A single row is not a variation to read — it is the lone
+            end-of-day figure — so intraday treats that as empty too. */}
+        {!error && !loading && !isDaily && data && data.rows.length <= 1 && (
+          <EmptyState
+            coverage={coverage}
+            date={effectiveDate}
+            onUseDaily={() => {
+              setLive(false);
+              setIntervalV(DAILY);
+            }}
+          />
+        )}
+
+        {!error && data && (isDaily || data.rows.length > 1) && (
           <OiTable rows={data.rows} strike={data.strike} interval={data.interval} />
         )}
       </main>

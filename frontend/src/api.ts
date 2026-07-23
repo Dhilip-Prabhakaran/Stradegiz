@@ -73,6 +73,19 @@ export interface CaptureHealth {
 export const fetchCaptureHealth = () =>
   getJson<CaptureHealth>('/api/health/capture');
 
+export interface Coverage {
+  underlying: string;
+  /** First/last day the recorder actually captured a session. */
+  intraday_from: string | null;
+  intraday_to: string | null;
+  /** Full span including the end-of-day backfill. */
+  history_from: string | null;
+  history_to: string | null;
+}
+
+export const fetchCoverage = (underlying: string) =>
+  getJson<Coverage>(`/api/oi/coverage?underlying=${underlying}`);
+
 export const fetchExpiries = (underlying: string) =>
   getJson<string[]>(`/api/oi/expiries?underlying=${underlying}`);
 

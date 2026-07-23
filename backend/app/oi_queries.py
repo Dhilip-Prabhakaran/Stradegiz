@@ -53,6 +53,52 @@ def available_strikes(underlying: str, expiry: date) -> list[float]:
             return [float(r[0]) for r in cur.fetchall()]
 
 
+def coverage(underlying: str) -> dict[str, Any]:
+    """What history exists, so the UI can explain an empty intraday view.
+
+    Intraday and daily coverage differ fundamentally: daily comes from the
+    bhavcopy archive and can reach back years, while intraday only exists for
+    days the recorder was actually running. A day is counted as having
+    intraday coverage when it holds more than one snapshot — a lone row is the
+    end-of-day backfill, not a recorded session.
+    """
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT min(d), max(d) FROM (
+                    SELECT (ts AT TIME ZONE 'Asia/Kolkata')::date AS d
+                    FROM options_chain
+                    WHERE underlying = %s
+                    GROUP BY 1
+                    HAVING count(DISTINCT ts) > 1
+                ) intraday_days
+                """,
+                (underlying,),
+            )
+            intraday_from, intraday_to = cur.fetchone() or (None, None)
+
+            cur.execute(
+                """
+                SELECT min((ts AT TIME ZONE 'Asia/Kolkata')::date),
+                       max((ts AT TIME ZONE 'Asia/Kolkata')::date)
+                FROM options_chain
+                WHERE underlying = %s
+                """,
+                (underlying,),
+            )
+            any_from, any_to = cur.fetchone() or (None, None)
+
+    iso = lambda d: d.isoformat() if d else None  # noqa: E731
+    return {
+        "underlying": underlying,
+        "intraday_from": iso(intraday_from),
+        "intraday_to": iso(intraday_to),
+        "history_from": iso(any_from),
+        "history_to": iso(any_to),
+    }
+
+
 def _f(value: Any) -> float | None:
     return float(value) if isinstance(value, (Decimal, int, float)) else None
 

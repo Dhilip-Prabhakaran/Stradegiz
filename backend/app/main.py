@@ -62,6 +62,12 @@ def oi_expiries(underlying: str = Query("NIFTY")) -> list[str]:
     return oi_queries.available_expiries(underlying.upper())
 
 
+@app.get("/api/oi/coverage")
+def oi_coverage(underlying: str = Query("NIFTY")) -> dict:
+    """Which history exists, so the UI can explain an empty intraday view."""
+    return oi_queries.coverage(underlying.upper())
+
+
 @app.get("/api/oi/strikes")
 def oi_strikes(
     underlying: str = Query("NIFTY"),
