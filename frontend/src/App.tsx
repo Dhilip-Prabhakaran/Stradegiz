@@ -8,7 +8,7 @@ import {
   type OiAnalysis,
 } from './api';
 
-const UNDERLYINGS = ['NIFTY', 'BANKNIFTY'];
+const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX'];
 const INTERVALS = ['1min', '3min', '5min', '15min', '30min', '60min'];
 
 /** How often Live mode re-polls. The recorder writes every 5 min, so a
