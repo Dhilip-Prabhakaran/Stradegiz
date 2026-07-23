@@ -56,6 +56,15 @@ def segment_for(underlying: str) -> str:
         )
     return seg
 
+#: Quote-response field names, confirmed against a live payload. These match
+#: neither the published docs nor the scrip-master naming, so they are pinned
+#: here rather than guessed: the token arrives as `exchange_token`, open
+#: interest as `open_int`, and volume as `last_volume`.
+Q_TOKEN = ("exchange_token", "instrument_token", "token")
+Q_OI = ("open_int", "open_interest", "oi")
+Q_VOLUME = ("last_volume", "volume", "trade_volume")
+Q_LTP = ("ltp", "last_traded_price", "last_price")
+
 #: Scrip-master column names, including the trailing-semicolon quirk.
 COL_TOKEN = "pSymbol"
 COL_NAME = "pSymbolName"
@@ -301,8 +310,8 @@ class KotakNeoSource:
             if info is None:
                 continue
 
-            oi = _int(_pick(quote, "open_interest", "oi", "openInterest", "OI"))
-            volume = _int(_pick(quote, "volume", "v", "trade_volume", "vol"))
+            oi = _int(_pick(quote, *Q_OI))
+            volume = _int(_pick(quote, *Q_VOLUME))
             # A strike with neither OI nor volume carries no signal; skipping
             # keeps the archive free of empty far-out strikes.
             if oi == 0 and volume == 0:
@@ -316,11 +325,16 @@ class KotakNeoSource:
                     option_type=info["option_type"],
                     ts=ts,
                     oi=oi,
-                    prev_oi=_int(_pick(quote, "prev_oi", "previous_oi")) or None,
+                    # Kotak's quote carries no previous-day OI; OI change is
+                    # derived from consecutive snapshots, which is the point
+                    # of keeping this archive.
+                    prev_oi=None,
                     volume=volume,
-                    ltp=_dec(_pick(quote, "last_traded_price", "ltp", "last_price")),
-                    iv=_dec(_pick(quote, "iv", "implied_volatility")),
-                    spot=_dec(_pick(quote, "underlying_spot_price", "spot")),
+                    ltp=_dec(_pick(quote, *Q_LTP)),
+                    # Neither implied volatility nor the underlying spot are
+                    # present in this payload; both columns stay nullable.
+                    iv=None,
+                    spot=None,
                 )
             )
         return rows
@@ -343,7 +357,7 @@ class KotakNeoSource:
                 quote_type="all",
             )
             for q in _rows(resp):
-                token = _pick(q, "instrument_token", COL_TOKEN, "token", "tk")
+                token = _pick(q, *Q_TOKEN)
                 if token is not None:
                     out[str(token)] = q
         return out
