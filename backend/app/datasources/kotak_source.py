@@ -1,21 +1,22 @@
 """Live option-chain snapshots from the Kotak Neo API.
 
-Data access only — this project never places orders, even though these
-credentials could. The account credentials grant full trading access, so they
-come from the environment (gitignored .env) and are never logged.
+Data access only — this project never places orders.
 
-Kotak has no dedicated option-chain endpoint, so the chain is assembled:
-    search_scrip(nse_fo, NIFTY, expiry) -> option instrument tokens
-    quotes(tokens, "all")               -> OI / LTP / volume per instrument
+Findings from reading the installed SDK source (neo_api_client 2.0.x), which
+differ from the published docs and drive the design here:
 
-Auth is via a TOTP secret (a static seed), so unlike Upstox's interactive
-OAuth the recorder can generate today's code with pyotp and log in unattended
-each morning.
-
-NOTE (verify on first live run): the exact quote field names below are parsed
-defensively because the SDK docs did not include a sample payload. The
-_pick / _pick_num helpers tolerate several spellings; confirm against a real
-response and tighten once seen.
+* **Market data needs only the consumer key.** `quotes` and `scrip_search`
+  send `Authorization: <consumer_key>` and nothing else, whereas account APIs
+  (positions, holdings) additionally send `Sid`/`Auth` from the TOTP session.
+  So no login, no MPIN, no TOTP, and no session that could collide with
+  another tool using the same account.
+* `NeoAPI` takes `consumer_key` only — `consumer_secret` is commented out.
+* The SDK **returns** error dicts (`{'error': [...]}`) rather than raising.
+* `search_scrip` downloads and pandas-filters the whole F&O scrip-master CSV
+  on every call, so results are cached per day here — re-downloading it every
+  five minutes would be slow and rude.
+* Scrip-master column quirks: the strike column is literally ``dStrikePrice;``
+  (trailing semicolon) and its values are **multiplied by 100**.
 """
 
 from __future__ import annotations
@@ -25,18 +26,15 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-import pyotp
-
 from ..config import KotakCreds
 from .base import DataSourceError
 from .upstox_source import ChainRow  # shared flat-row shape
 
 log = logging.getLogger("stradegiz.kotak")
 
-# Kotak exchange-segment codes.
 SEG_FO = "nse_fo"
 
-# Underlying symbols as they appear in the F&O scrip master.
+#: Underlying names as they appear in the scrip master's pSymbolName column.
 FO_SYMBOL = {
     "NIFTY": "NIFTY",
     "BANKNIFTY": "BANKNIFTY",
@@ -44,10 +42,20 @@ FO_SYMBOL = {
     "MIDCPNIFTY": "MIDCPNIFTY",
 }
 
+#: Scrip-master column names, including the trailing-semicolon quirk.
+COL_TOKEN = "pSymbol"
+COL_NAME = "pSymbolName"
+COL_OPTION_TYPE = "pOptionType"
+COL_EXPIRY = "pExpiryDate"
+COL_STRIKE = "dStrikePrice;"
+
+#: The scrip master stores strikes as paise-style integers (value * 100).
+STRIKE_SCALE = Decimal(100)
+
 
 def _pick(row: dict[str, Any], *keys: str) -> Any:
     """First present, non-null value among candidate keys (case-insensitive)."""
-    lowered = {k.lower(): v for k, v in row.items()}
+    lowered = {str(k).lower(): v for k, v in row.items()}
     for key in keys:
         v = lowered.get(key.lower())
         if v not in (None, ""):
@@ -71,83 +79,121 @@ def _int(value: Any) -> int:
         return 0
 
 
+def _check_error(resp: Any, what: str) -> None:
+    """The SDK reports failures by returning them; surface those as errors."""
+    if isinstance(resp, dict):
+        if resp.get("error"):
+            raise DataSourceError(f"Kotak {what} error: {str(resp['error'])[:200]}")
+        if resp.get("Error"):
+            raise DataSourceError(f"Kotak {what} error: {str(resp['Error'])[:200]}")
+
+
+def _rows(resp: Any) -> list[dict[str, Any]]:
+    """Normalise the SDK's varied return shapes to a list of dicts."""
+    if resp is None:
+        return []
+    if isinstance(resp, list):
+        return [r for r in resp if isinstance(r, dict)]
+    if isinstance(resp, dict):
+        # "No data found..." comes back as a bare message dict.
+        if "message" in resp and "data" not in resp:
+            return []
+        for key in ("data", "result", "Success", "success"):
+            inner = resp.get(key)
+            if isinstance(inner, list):
+                return [r for r in inner if isinstance(r, dict)]
+        return [resp]
+    return []
+
+
+def _parse_expiry(value: Any) -> date | None:
+    """search_scrip normalises expiry to '%d%b%Y' (e.g. 31JUL2026)."""
+    if value in (None, ""):
+        return None
+    for fmt in ("%d%b%Y", "%d-%b-%Y", "%d%b%y"):
+        try:
+            return datetime.strptime(str(value).upper().strip(), fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
 class KotakNeoSource:
     name = "kotak"
 
     def __init__(self, creds: KotakCreds) -> None:
-        if not creds.is_complete():
+        if not creds.consumer_key:
             raise DataSourceError(
-                "Kotak credentials are incomplete — set KOTAK_* in .env "
-                "(consumer_key, consumer_secret, mobile, ucc, mpin, totp_secret)"
+                "KOTAK_CONSUMER_KEY is not set — market data needs the app token "
+                "from Kotak Neo: Invest -> Trade API -> API Dashboard"
             )
         self._creds = creds
-        self._client: Any = None
+        self._api: Any = None
+        # Instrument metadata per underlying, refreshed once per trading day.
+        self._scrip_cache: dict[str, tuple[date, list[dict[str, Any]]]] = {}
 
-    # --- session ------------------------------------------------------
+    # --- client -------------------------------------------------------
 
-    def _login(self) -> Any:
-        # Imported lazily so the module loads even where the SDK is absent
-        # (e.g. running the unit tests), failing only if Kotak is actually used.
+    def _client(self) -> Any:
+        if self._api is not None:
+            return self._api
+
         try:
             from neo_api_client import NeoAPI
         except ImportError as exc:  # pragma: no cover
             raise DataSourceError(
-                "neo-api-client is not installed — add it to requirements"
+                "neo_api_client is not installed — see requirements-recorder.txt"
             ) from exc
 
-        client = NeoAPI(
+        # consumer_key alone authorises market data; no session is created,
+        # so this cannot disturb another tool logged into the same account.
+        self._api = NeoAPI(
             consumer_key=self._creds.consumer_key,
-            consumer_secret=self._creds.consumer_secret,
             environment="prod",
         )
-        try:
-            totp = pyotp.TOTP(self._creds.totp_secret).now()
-            client.totp_login(
-                mobilenumber=self._creds.mobile, ucc=self._creds.ucc, totp=totp
-            )
-            client.totp_validate(mpin=self._creds.mpin)
-        except Exception as exc:  # SDK raises assorted exception types
-            raise DataSourceError(f"Kotak login failed: {exc}") from exc
+        log.info("Kotak client ready (market-data mode, no session)")
+        return self._api
 
-        log.info("Kotak session established")
-        return client
+    # --- instruments --------------------------------------------------
 
-    def _ensure_client(self) -> Any:
-        if self._client is None:
-            self._client = self._login()
-        return self._client
+    def _instruments(self, symbol: str, today: date) -> list[dict[str, Any]]:
+        """Option instruments for an underlying, cached for the trading day.
 
-    def _call(self, method: str, **kwargs: Any) -> Any:
-        """Invoke an SDK method, re-logging-in once if the session has lapsed.
-
-        Kotak sessions expire (roughly daily), so a single transparent
-        re-login keeps the long-running recorder going without a restart.
+        search_scrip downloads the entire F&O scrip master and filters it in
+        pandas, so this must not run on every five-minute snapshot.
         """
-        for attempt in (1, 2):
-            client = self._ensure_client()
-            try:
-                return getattr(client, method)(**kwargs)
-            except Exception as exc:  # noqa: BLE001
-                if attempt == 2:
-                    raise DataSourceError(f"Kotak {method} failed: {exc}") from exc
-                log.warning("Kotak %s failed (%s) — re-logging in", method, exc)
-                self._client = None  # force a fresh login on retry
+        cached = self._scrip_cache.get(symbol)
+        if cached and cached[0] == today:
+            return cached[1]
 
-    # --- data ---------------------------------------------------------
+        resp = self._client().search_scrip(
+            exchange_segment=SEG_FO,
+            symbol=symbol,
+            option_type="CE,PE",
+        )
+        _check_error(resp, "search_scrip")
+        rows = _rows(resp)
+        if not rows:
+            raise DataSourceError(f"scrip master returned no {symbol} options")
+
+        self._scrip_cache[symbol] = (today, rows)
+        log.info("cached %d %s option instruments for %s", len(rows), symbol, today)
+        return rows
 
     def expiries(self, underlying: str) -> list[date]:
-        """Distinct expiries available for the underlying's options."""
         symbol = FO_SYMBOL.get(underlying)
         if symbol is None:
             raise DataSourceError(f"unknown underlying: {underlying}")
 
-        rows = self._scrip_rows(symbol)
-        out: set[date] = set()
-        for r in rows:
-            d = _parse_expiry(_pick(r, "pExpiryDate", "expiry", "pExpiry"))
-            if d is not None:
-                out.add(d)
-        return sorted(out)
+        today = datetime.now().date()
+        found = {
+            d
+            for r in self._instruments(symbol, today)
+            if (d := _parse_expiry(_pick(r, COL_EXPIRY))) is not None
+        }
+        return sorted(found)
+
+    # --- chain --------------------------------------------------------
 
     def fetch_chain(
         self, underlying: str, expiry: date, ts: datetime
@@ -156,32 +202,42 @@ class KotakNeoSource:
         if symbol is None:
             raise DataSourceError(f"unknown underlying: {underlying}")
 
-        # Instruments for this expiry, mapped by token so quote responses can
-        # be joined back to their strike and option type.
+        # token -> (strike, option_type) for this expiry
         meta: dict[str, dict[str, Any]] = {}
-        for r in self._scrip_rows(symbol):
-            if _parse_expiry(_pick(r, "pExpiryDate", "expiry", "pExpiry")) != expiry:
+        for r in self._instruments(symbol, ts.date()):
+            if _parse_expiry(_pick(r, COL_EXPIRY)) != expiry:
                 continue
-            token = _pick(r, "pSymbol", "instrument_token", "pTrdSymbol")
-            opt = _pick(r, "pOptionType", "option_type", "optionType")
-            strike = _dec(_pick(r, "dStrikePrice", "strike_price", "pStrikePrice"))
-            if token is None or opt not in ("CE", "PE") or strike is None:
+
+            token = _pick(r, COL_TOKEN)
+            opt = _pick(r, COL_OPTION_TYPE)
+            raw_strike = _dec(_pick(r, COL_STRIKE, "dStrikePrice"))
+            if token is None or raw_strike is None or opt is None:
                 continue
-            meta[str(token)] = {"strike": strike, "option_type": opt}
+
+            opt = str(opt).upper().strip()
+            if opt not in ("CE", "PE"):
+                continue
+
+            meta[str(token)] = {
+                "strike": raw_strike / STRIKE_SCALE,
+                "option_type": opt,
+            }
 
         if not meta:
             raise DataSourceError(
-                f"no {underlying} option instruments found for expiry {expiry}"
+                f"no {underlying} option instruments for expiry {expiry}"
             )
 
         rows: list[ChainRow] = []
-        for token, quote in self._quotes(list(meta.keys())).items():
+        for token, quote in self._quotes(list(meta)).items():
             info = meta.get(str(token))
             if info is None:
                 continue
 
-            oi = _int(_pick(quote, "open_interest", "oi", "openInterest"))
-            volume = _int(_pick(quote, "volume", "v", "trade_volume"))
+            oi = _int(_pick(quote, "open_interest", "oi", "openInterest", "OI"))
+            volume = _int(_pick(quote, "volume", "v", "trade_volume", "vol"))
+            # A strike with neither OI nor volume carries no signal; skipping
+            # keeps the archive free of empty far-out strikes.
             if oi == 0 and volume == 0:
                 continue
 
@@ -202,70 +258,26 @@ class KotakNeoSource:
             )
         return rows
 
-    # --- SDK plumbing -------------------------------------------------
-
-    def _scrip_rows(self, symbol: str) -> list[dict[str, Any]]:
-        resp = self._call(
-            "search_scrip", exchange_segment=SEG_FO, symbol=symbol
-        )
-        return _as_rows(resp)
-
     def _quotes(self, tokens: list[str]) -> dict[str, dict[str, Any]]:
         """Quotes keyed by instrument token.
 
-        Requested in batches: a full index chain is a few hundred instruments
-        and a single unbounded request risks a provider-side limit.
+        Batched because the SDK encodes every token into the request URL, and
+        a full index chain would otherwise build an unreasonably long one.
         """
-        by_token: dict[str, dict[str, Any]] = {}
-        for batch in _chunks(tokens, 100):
+        out: dict[str, dict[str, Any]] = {}
+        for batch in _chunks(tokens, 50):
             instruments = [
                 {"instrument_token": t, "exchange_segment": SEG_FO} for t in batch
             ]
-            resp = self._call("quotes", instrument_tokens=instruments, quote_type="all")
-            for q in _as_rows(resp):
-                token = _pick(q, "instrument_token", "pSymbol", "token")
+            resp = self._client().quotes(
+                instrument_tokens=instruments, quote_type="all"
+            )
+            _check_error(resp, "quotes")
+            for q in _rows(resp):
+                token = _pick(q, "instrument_token", COL_TOKEN, "token", "tk")
                 if token is not None:
-                    by_token[str(token)] = q
-        return by_token
-
-
-def _as_rows(resp: Any) -> list[dict[str, Any]]:
-    """Normalise the SDK's varied return shapes to a list of dicts."""
-    if resp is None:
-        return []
-    if isinstance(resp, dict):
-        # SDK commonly wraps results under 'data'/'result'/'Success'.
-        for key in ("data", "result", "Success", "success"):
-            inner = resp.get(key)
-            if isinstance(inner, list):
-                return [r for r in inner if isinstance(r, dict)]
-        return [resp]
-    if isinstance(resp, list):
-        return [r for r in resp if isinstance(r, dict)]
-    return []
-
-
-def _parse_expiry(value: Any) -> date | None:
-    """Kotak encodes expiry variously (epoch seconds, or 'DDMMMYYYY')."""
-    if value in (None, ""):
-        return None
-    # Numeric epoch (seconds since 1980 in some Kotak feeds, or unix seconds).
-    try:
-        epoch = int(float(value))
-        if epoch > 10_000_000:  # plausibly a timestamp, not a small id
-            # Kotak F&O expiry epochs are seconds from 1980-01-01.
-            from datetime import timedelta, timezone
-
-            base = datetime(1980, 1, 1, tzinfo=timezone.utc)
-            return (base + timedelta(seconds=epoch)).date()
-    except (TypeError, ValueError):
-        pass
-    for fmt in ("%d%b%Y", "%d-%b-%Y", "%d%b%y"):
-        try:
-            return datetime.strptime(str(value).upper(), fmt).date()
-        except ValueError:
-            continue
-    return None
+                    out[str(token)] = q
+        return out
 
 
 def _chunks(items: list[str], size: int):

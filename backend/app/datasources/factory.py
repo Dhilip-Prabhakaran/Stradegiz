@@ -20,7 +20,9 @@ def make_source(settings: Settings):
 
         if settings.kotak is None or not settings.kotak.is_complete():
             raise DataSourceError(
-                "DATA_SOURCE=kotak but KOTAK_* credentials are incomplete in .env"
+                "DATA_SOURCE=kotak but KOTAK_CONSUMER_KEY is not set in .env — "
+                "it is the app TOKEN from Kotak Neo: Invest -> Trade API -> "
+                "API Dashboard (the only credential market data needs)"
             )
         return KotakNeoSource(settings.kotak)
 

@@ -7,7 +7,6 @@
 psycopg[binary]>=3.2
 psycopg-pool>=3.2
 httpx>=0.27
-pyotp>=2.9
 
 # Kotak Neo SDK ships only from GitHub, not PyPI.
 neo_api_client @ git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@v2.0.2

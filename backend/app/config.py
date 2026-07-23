@@ -25,36 +25,23 @@ class Settings:
 
 @dataclass(frozen=True)
 class KotakCreds:
+    """Kotak Neo credentials.
+
+    Only `consumer_key` is needed: the SDK sends it as the sole Authorization
+    header for the market-data endpoints (quotes, scrip search). The account
+    APIs would additionally need a TOTP session, but this project never calls
+    them — so no MPIN or TOTP secret is stored, and no login session is
+    created that could collide with another tool on the same account.
+    """
+
     consumer_key: str
-    consumer_secret: str
-    mobile: str
-    ucc: str
-    mpin: str
-    totp_secret: str
 
     def is_complete(self) -> bool:
-        return all(
-            (
-                self.consumer_key,
-                self.consumer_secret,
-                self.mobile,
-                self.ucc,
-                self.mpin,
-                self.totp_secret,
-            )
-        )
+        return bool(self.consumer_key)
 
 
 def _kotak_creds() -> KotakCreds:
-    e = os.environ.get
-    return KotakCreds(
-        consumer_key=e("KOTAK_CONSUMER_KEY", ""),
-        consumer_secret=e("KOTAK_CONSUMER_SECRET", ""),
-        mobile=e("KOTAK_MOBILE", ""),
-        ucc=e("KOTAK_UCC", ""),
-        mpin=e("KOTAK_MPIN", ""),
-        totp_secret=e("KOTAK_TOTP_SECRET", ""),
-    )
+    return KotakCreds(consumer_key=os.environ.get("KOTAK_CONSUMER_KEY", ""))
 
 
 def get_settings() -> Settings:
