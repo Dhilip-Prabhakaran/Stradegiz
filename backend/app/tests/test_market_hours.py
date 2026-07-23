@@ -1,6 +1,14 @@
 from datetime import datetime
 
-from app.market_hours import IST, is_market_open, next_tick, next_token_expiry
+from app.market_hours import (
+    IST,
+    is_expected_session,
+    is_holiday,
+    is_market_open,
+    is_trading_day,
+    next_tick,
+    next_token_expiry,
+)
 
 # 2026-07-21 is a Tuesday; 2026-07-25 a Saturday.
 TUE = (2026, 7, 21)
@@ -45,6 +53,38 @@ class TestNextTick:
 
     def test_rolls_over_the_hour(self):
         assert next_tick(300, ist(*TUE, 12, 58, 1)) == ist(*TUE, 13, 0)
+
+
+class TestHolidays:
+    """The recorder must never be silenced by an advisory holiday list.
+
+    Polling through a holiday costs a few wasted requests. Wrongly skipping a
+    real session loses intraday history permanently, so the two mistakes are
+    not equally bad and the code deliberately errs towards capturing.
+    """
+
+    # 2026-01-26 (Republic Day) is a Monday holiday.
+    HOLIDAY = (2026, 1, 26)
+
+    def test_date_is_recognised_as_a_holiday(self):
+        assert is_holiday(ist(*self.HOLIDAY, 12, 0).date())
+
+    def test_not_an_expected_trading_day(self):
+        assert not is_trading_day(ist(*self.HOLIDAY, 12, 0).date())
+
+    def test_recorder_still_captures_on_a_holiday(self):
+        # The safety property: a wrong list entry must not stop recording.
+        assert is_market_open(ist(*self.HOLIDAY, 12, 0))
+
+    def test_no_session_expected_on_a_holiday(self):
+        # ...but nothing is expected to arrive, so alerts stay quiet.
+        assert not is_expected_session(ist(*self.HOLIDAY, 12, 0))
+
+    def test_normal_trading_day_expects_a_session(self):
+        assert is_expected_session(ist(*TUE, 12, 0))
+
+    def test_holiday_outside_hours_expects_nothing(self):
+        assert not is_expected_session(ist(*self.HOLIDAY, 20, 0))
 
 
 class TestNextTokenExpiry:

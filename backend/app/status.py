@@ -12,7 +12,7 @@ from typing import Any
 from . import auth
 from .config import get_settings
 from .db import connection
-from .market_hours import is_market_open, now_ist
+from .market_hours import is_expected_session, is_holiday, is_market_open, now_ist
 
 
 def last_captures() -> list[dict[str, Any]]:
@@ -64,13 +64,17 @@ def capture_health() -> dict[str, Any]:
     settings = get_settings()
     provider = settings.data_source
     captures = last_captures()
-    market_open = is_market_open()
+    now = now_ist()
+    market_open = is_market_open(now)
+    # Staleness is judged against an *expected* session: on a holiday the
+    # recorder is running but nothing is trading, so silence is not a fault.
+    expected = is_expected_session(now)
 
     newest_ok = max(
         (c["ts"] for c in captures if c["status"] == "ok" and c["ts"]),
         default=None,
     )
-    stale = is_stale(newest_ok, market_open, settings.capture_interval_seconds)
+    stale = is_stale(newest_ok, expected, settings.capture_interval_seconds)
     failing = [c for c in captures if c["status"] == "error"]
 
     if provider == "kotak":
@@ -96,8 +100,9 @@ def capture_health() -> dict[str, Any]:
         healthy = (token.valid if market_open else token.present) and not stale
 
     return {
-        "now_ist": now_ist().isoformat(),
+        "now_ist": now.isoformat(),
         "market_open": market_open,
+        "is_holiday": is_holiday(now.date()),
         "healthy": healthy,
         "stale": stale,
         "data_source": provider,
