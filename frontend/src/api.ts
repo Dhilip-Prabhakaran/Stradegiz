@@ -39,12 +39,16 @@ export interface OiAnalysis {
   rows: OiRow[];
 }
 
-export interface TokenStatus {
-  present: boolean;
-  valid: boolean;
-  issued_at: string | null;
-  expires_at: string | null;
-  seconds_left: number | null;
+export interface AuthStatus {
+  mode: 'auto-login' | 'manual-token';
+  provider: string;
+  manual_action_needed: boolean;
+  /** Present only for manual-token providers (Upstox). */
+  present?: boolean;
+  valid?: boolean;
+  issued_at?: string | null;
+  expires_at?: string | null;
+  seconds_left?: number | null;
 }
 
 export interface CaptureEntry {
@@ -59,7 +63,10 @@ export interface CaptureHealth {
   now_ist: string;
   market_open: boolean;
   healthy: boolean;
-  token: TokenStatus;
+  stale: boolean;
+  data_source: string;
+  auth: AuthStatus;
+  last_success: string | null;
   captures: CaptureEntry[];
 }
 
