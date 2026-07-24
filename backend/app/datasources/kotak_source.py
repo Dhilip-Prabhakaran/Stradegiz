@@ -26,11 +26,32 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from dataclasses import dataclass
+
 from ..config import KotakCreds
 from .base import DataSourceError
 from .upstox_source import ChainRow  # shared flat-row shape
 
 log = logging.getLogger("stradegiz.kotak")
+
+
+@dataclass(frozen=True)
+class FutureSnapshot:
+    """Front-month index-futures state at one instant.
+
+    Kotak has no historical intraday feed, so — like the option chain — these
+    are captured live and archived. `day_high`/`day_low` come from the quote's
+    session OHLC, not the 5-minute bucket.
+    """
+
+    underlying: str
+    expiry: date
+    ts: datetime
+    ltp: Decimal | None
+    oi: int
+    volume: int
+    day_high: Decimal | None
+    day_low: Decimal | None
 
 SEG_NSE_FO = "nse_fo"
 SEG_BSE_FO = "bse_fo"
@@ -65,8 +86,13 @@ Q_OI = ("open_int", "open_interest", "oi")
 Q_VOLUME = ("last_volume", "volume", "trade_volume")
 Q_LTP = ("ltp", "last_traded_price", "last_price")
 
+#: pInstType values in the scrip master (index options vs index futures).
+INST_OPTION = "OPTIDX"
+INST_FUTURE = "FUTIDX"
+
 #: Scrip-master column names, including the trailing-semicolon quirk.
 COL_TOKEN = "pSymbol"
+COL_INST_TYPE = "pInstType"
 COL_NAME = "pSymbolName"
 COL_OPTION_TYPE = "pOptionType"
 COL_EXPIRY = "pExpiryDate"
@@ -159,6 +185,7 @@ class KotakNeoSource:
         self._api: Any = None
         # Instrument metadata per underlying, refreshed once per trading day.
         self._scrip_cache: dict[str, tuple[date, list[dict[str, Any]]]] = {}
+        self._fut_cache: dict[str, tuple[date, list[dict[str, Any]]]] = {}
 
     # --- client -------------------------------------------------------
 
@@ -270,6 +297,71 @@ class KotakNeoSource:
             if (d := _parse_expiry(_pick(r, COL_EXPIRY))) is not None
         }
         return sorted(found)
+
+    # --- futures ------------------------------------------------------
+
+    def _future_instruments(self, underlying: str, today: date) -> list[dict[str, Any]]:
+        """Index-futures contracts for an underlying, cached per trading day.
+
+        A separate scrip fetch from the options cache: the options call filters
+        to CE/PE, which excludes futures.
+        """
+        cached = self._fut_cache.get(underlying)
+        if cached and cached[0] == today:
+            return cached[1]
+
+        segment = segment_for(underlying)
+        resp = self._call(
+            "search_scrip", "search_scrip",
+            exchange_segment=segment,
+            symbol=underlying.lower(),
+        )
+        rows = [
+            r
+            for r in _rows(resp)
+            if str(_pick(r, COL_NAME) or "").strip().upper() == underlying
+            and str(_pick(r, COL_INST_TYPE) or "").strip().upper() == INST_FUTURE
+        ]
+        if not rows:
+            raise DataSourceError(f"no {underlying} futures in {segment}")
+
+        self._fut_cache[underlying] = (today, rows)
+        return rows
+
+    def fetch_front_future(self, underlying: str, ts: datetime) -> FutureSnapshot:
+        """The front-month (nearest un-expired) futures contract, quoted live."""
+        segment = segment_for(underlying)
+        today = ts.date()
+
+        dated = [
+            (d, r)
+            for r in self._future_instruments(underlying, today)
+            if (d := _parse_expiry(_pick(r, COL_EXPIRY))) is not None
+        ]
+        if not dated:
+            raise DataSourceError(f"no dated {underlying} futures contract")
+
+        # Front month: nearest expiry not yet past. On expiry day itself the
+        # contract still trades, so >= today keeps it until it rolls.
+        upcoming = sorted(d for d, _ in dated if d >= today) or sorted(d for d, _ in dated)
+        front_expiry = upcoming[0]
+        token = str(_pick(next(r for d, r in dated if d == front_expiry), COL_TOKEN))
+
+        quote = self._quotes([token], segment).get(token)
+        if quote is None:
+            raise DataSourceError(f"no quote for {underlying} front future")
+
+        ohlc = quote.get("ohlc") if isinstance(quote.get("ohlc"), dict) else {}
+        return FutureSnapshot(
+            underlying=underlying,
+            expiry=front_expiry,
+            ts=ts,
+            ltp=_dec(_pick(quote, *Q_LTP)),
+            oi=_int(_pick(quote, *Q_OI)),
+            volume=_int(_pick(quote, *Q_VOLUME)),
+            day_high=_dec(ohlc.get("high")),
+            day_low=_dec(ohlc.get("low")),
+        )
 
     # --- chain --------------------------------------------------------
 

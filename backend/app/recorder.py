@@ -53,6 +53,28 @@ def _store(rows: list[ChainRow]) -> int:
     return len(rows)
 
 
+FUT_SQL = """
+INSERT INTO futures_snapshot (underlying, expiry, ts, total_oi, volume, ltp,
+                             day_high, day_low)
+VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+ON CONFLICT (underlying, expiry, ts) DO UPDATE SET
+    total_oi = EXCLUDED.total_oi, volume = EXCLUDED.volume, ltp = EXCLUDED.ltp,
+    day_high = EXCLUDED.day_high, day_low = EXCLUDED.day_low
+"""
+
+
+def _store_future(fut) -> None:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                FUT_SQL,
+                (
+                    fut.underlying, fut.expiry, fut.ts, fut.oi, fut.volume,
+                    fut.ltp, fut.day_high, fut.day_low,
+                ),
+            )
+
+
 def _log_capture(underlying: str, status: str, rows: int, detail: str | None) -> None:
     with connection() as conn:
         with conn.cursor() as cur:
@@ -91,8 +113,23 @@ def capture_once(
             rows = source.fetch_chain(underlying, target, ts)
             written = _store(rows)
             total += written
+
+            # Front-month futures price + OI, for the price-based strategies.
+            # Best-effort: a futures hiccup must not fail the option capture,
+            # which is the primary archive.
+            fut_note = ""
+            try:
+                fut = source.fetch_front_future(underlying, ts)
+                _store_future(fut)
+                fut_note = f", fut ltp={fut.ltp}"
+            except (DataSourceError, AttributeError) as exc:
+                fut_note = f", fut failed: {str(exc)[:60]}"
+
             _log_capture(underlying, "ok", written, f"expiry={target}")
-            log.info("%s %s: %d rows (expiry %s)", underlying, ts.strftime("%H:%M:%S"), written, target)
+            log.info(
+                "%s %s: %d rows (expiry %s)%s",
+                underlying, ts.strftime("%H:%M:%S"), written, target, fut_note,
+            )
 
         except DataSourceError as exc:
             # One underlying failing must not stop the others, and the gap
